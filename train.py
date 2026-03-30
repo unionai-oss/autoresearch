@@ -9,6 +9,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
+import sys
 import time
 from dataclasses import dataclass, asdict
 
@@ -16,13 +17,51 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kernels import get_kernel
-cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+# Conditional compilation support for Python 3.14+
+def _maybe_compile(func):
+    if sys.version_info >= (3, 14):
+        return func
+    return torch.compile(func, dynamic=False, fullgraph=True)
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+
+# Check GPU capability and use Flash Attention only if supported (Ampere or newer)
+cap = torch.cuda.get_device_capability()
+_fa3_kernel = None
+
+if cap[0] >= 8:  # Ampere is 8.0+
+    try:
+        from kernels import get_kernel
+        # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
+        repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+        _fa3_kernel = get_kernel(repo).flash_attn_interface
+    except Exception as e:
+        print(f"Warning: Failed to load Flash Attention: {e}. Using fallback attention.")
+        _fa3_kernel = None
+
+def flash_attn_or_fallback(q, k, v, causal=True, window_size=None):
+    """Use Flash Attention if available, else fall back to basic scaled dot-product."""
+    if _fa3_kernel is not None:
+        return _fa3_kernel.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+    # Basic scaled dot-product attention (no windowing for simplicity)
+    # Input: q, k, v all have shape (B, T, H, D)
+    B, T, H, D = q.shape
+    # Reshape to (B, H, T, D) for attention computation
+    q = q.transpose(1, 2)  # (B, H, T, D)
+    k = k.transpose(1, 2)  # (B, H, T, D)
+    v = v.transpose(1, 2)  # (B, H, T, D)
+
+    scale = D ** -0.5
+    scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, H, T, T)
+    if causal:
+        # Create causal mask: shape (T, T) will broadcast to (1, 1, T, T)
+        mask = torch.triu(torch.full((T, T), float('-inf'), device=q.device), diagonal=1)
+        scores = scores + mask[None, None, :, :]
+    attn_weights = torch.softmax(scores, dim=-1)
+    out = torch.matmul(attn_weights, v)  # (B, H, T, D)
+    # Reshape back to (B, T, H, D)
+    out = out.transpose(1, 2)
+    return out
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -89,7 +128,7 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        y = flash_attn_or_fallback(q, k, v, causal=True, window_size=window_size)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
@@ -301,7 +340,7 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
+@_maybe_compile
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
@@ -312,7 +351,7 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
-@torch.compile(dynamic=False, fullgraph=True)
+@_maybe_compile
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     # Nesterov momentum
@@ -429,25 +468,25 @@ class MuonAdamW(torch.optim.Optimizer):
 # ---------------------------------------------------------------------------
 
 # Model architecture
-ASPECT_RATIO = 64       # model_dim = depth * ASPECT_RATIO
-HEAD_DIM = 128          # target head dimension for attention
-WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
+ASPECT_RATIO = 48       # model_dim = depth * ASPECT_RATIO (increased from 32)
+HEAD_DIM = 64           # target head dimension for attention
+WINDOW_PATTERN = "L"    # sliding window pattern: L=full, S=half context (use L only for speed)
 
 # Optimization
-TOTAL_BATCH_SIZE = 2**19 # ~524K tokens per optimizer step
-EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
+TOTAL_BATCH_SIZE = 2**16 # ~65K tokens per optimizer step (reduced from 2^19)
+EMBEDDING_LR = 0.75     # learning rate for token embeddings (Adam) (increased from 0.7)
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
-MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
+MATRIX_LR = 0.045       # learning rate for matrix parameters (Muon) (increased from 0.04)
 SCALAR_LR = 0.5         # learning rate for per-layer scalars (Adam)
 WEIGHT_DECAY = 0.2      # cautious weight decay for Muon
 ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
 WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
-WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
+WARMDOWN_RATIO = 0.2    # fraction of time budget for LR warmdown (reduced from 0.3)
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+DEPTH = 4               # number of transformer layers (reduced from 8 for speed)
+DEVICE_BATCH_SIZE = 4   # per-device batch size (increased from 2 since model is smaller)
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -504,7 +543,8 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-model = torch.compile(model, dynamic=False)
+if sys.version_info < (3, 14):
+    model = torch.compile(model, dynamic=False)
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch

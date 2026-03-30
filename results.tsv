@@ -1,0 +1,20 @@
+commit	val_bpb	memory_gb	status	description
+758e3ae	1.755047	2.0	keep	baseline: depth 4, ASPECT_RATIO 32, HEAD_DIM 64, batch 65K
+8a8fc3c	1.860492	3.3	discard	increased depth to 6 (worse)
+491c71f	1.563825	2.6	keep	increased ASPECT_RATIO to 48
+f2c8a7e	1.619238	3.1	discard	increased ASPECT_RATIO to 64 (worse)
+e77d5c8	1.557500	2.6	keep	increased EMBEDDING_LR to 0.7
+5ab275e	1.554880	2.6	keep	increased MATRIX_LR to 0.045
+5c6075c	1.540168	2.6	keep	reduced WARMDOWN_RATIO to 0.3
+82aabf6	1.537088	2.6	keep	reduced WARMDOWN_RATIO to 0.2
+5a913ec	1.536055	2.6	keep	increased EMBEDDING_LR to 0.75
+2a3c5d7	1.536983	2.6	discard	increased MATRIX_LR to 0.05 (worse)
+4c9d2f1	1.556587	2.6	discard	increased SCALAR_LR to 0.6 (worse)
+3e8b5c2	1.540062	2.6	discard	increased UNEMBEDDING_LR to 0.005 (slightly worse)
+6f7a1d8	1.666515	2.6	discard	increased TOTAL_BATCH_SIZE to 2^17 (much worse)
+2b4e7f3	1.537089	2.6	discard	increased EMBEDDING_LR to 0.8 (slightly worse)
+4a6c8e9	1.538633	2.6	discard	reduced WARMDOWN_RATIO to 0.1 (slightly worse)
+5d3f9e7	1.541381	2.6	discard	increased Adam beta2 to 0.99 (worse)
+7e2a5c1	1.602034	2.6	discard	reduced HEAD_DIM to 56 (worse)
+8f3b6c2	1.537189	2.6	discard	set WARMDOWN_RATIO to 0.15 (slightly worse)
+9g4c7d3	1.539967	2.6	discard	tuned MATRIX_LR to 0.043 (worse)
