@@ -18,9 +18,14 @@ import torch.nn.functional as F
 
 from kernels import get_kernel
 cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+# Check if GPU supports FlashAttention (Ampere or newer, compute capability >= 8.0)
+supports_flash_attn = cap[0] >= 8
+if supports_flash_attn:
+    # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
+    repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+    fa3 = get_kernel(repo).flash_attn_interface
+else:
+    fa3 = None
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -57,6 +62,64 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
+def standard_attention(q, k, v, causal=True, window_size=None):
+    """Scaled dot-product attention using PyTorch's built-in, memory-efficient implementation.
+
+    Args:
+        q: (B, T, n_head, head_dim) query
+        k: (B, T, n_kv_head, head_dim) key
+        v: (B, T, n_kv_head, head_dim) value
+        causal: if True, apply causal mask
+        window_size: tuple (window, 0) for sliding window, or None for full attention
+
+    Returns:
+        out: (B, T, n_head, head_dim) attention output
+    """
+    B, T, n_head, head_dim = q.shape
+    n_kv_head = k.shape[2]
+    kv_repeat = n_head // n_kv_head
+
+    # Repeat k,v for grouped query attention if needed
+    if kv_repeat > 1:
+        k = k.repeat_interleave(kv_repeat, dim=2)  # (B, T, n_head, head_dim)
+        v = v.repeat_interleave(kv_repeat, dim=2)  # (B, T, n_head, head_dim)
+
+    # Transpose to (B, n_head, T, head_dim) for attention computation
+    q = q.transpose(1, 2)  # (B, n_head, T, head_dim)
+    k = k.transpose(1, 2)  # (B, n_head, T, head_dim)
+    v = v.transpose(1, 2)  # (B, n_head, T, head_dim)
+
+    # Create attention mask if needed
+    attn_mask = None
+    if causal or (window_size is not None and window_size[0] > 0 and window_size[0] < T):
+        # Create a causal mask (upper triangular)
+        if causal:
+            attn_mask = torch.ones((T, T), device=q.device, dtype=torch.bool).triu(diagonal=1)
+
+        # Apply windowing if specified
+        if window_size is not None:
+            window = window_size[0]
+            if window > 0 and window < T:
+                window_mask = torch.ones((T, T), device=q.device, dtype=torch.bool)
+                for i in range(T):
+                    start = max(0, i - window)
+                    window_mask[i, :start] = True  # Mask out positions outside window
+                    if not causal:
+                        window_mask[i, i+1:] = True
+                if attn_mask is not None:
+                    attn_mask = attn_mask | window_mask
+                else:
+                    attn_mask = window_mask
+
+    # Use PyTorch's scaled_dot_product_attention (memory efficient)
+    out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=causal and attn_mask is None)
+
+    # Transpose back to (B, T, n_head, head_dim)
+    out = out.transpose(1, 2)  # (B, T, n_head, head_dim)
+
+    return out
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -89,7 +152,11 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        # Use FlashAttention if available, otherwise use standard attention
+        if supports_flash_attn:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        else:
+            y = standard_attention(q, k, v, causal=True, window_size=window_size)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
@@ -301,7 +368,6 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
@@ -312,7 +378,6 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
-@torch.compile(dynamic=False, fullgraph=True)
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     # Nesterov momentum
@@ -434,20 +499,20 @@ HEAD_DIM = 128          # target head dimension for attention
 WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
 
 # Optimization
-TOTAL_BATCH_SIZE = 2**19 # ~524K tokens per optimizer step
-EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
-UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
-MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
+TOTAL_BATCH_SIZE = 2**16 # ~65K tokens per optimizer step (reduced for Tesla T4)
+EMBEDDING_LR = 1.5      # learning rate for token embeddings (Adam)
+UNEMBEDDING_LR = 0.012  # learning rate for lm_head (Adam)
+MATRIX_LR = 0.10        # learning rate for matrix parameters (Muon) - reduced slightly
 SCALAR_LR = 0.5         # learning rate for per-layer scalars (Adam)
-WEIGHT_DECAY = 0.2      # cautious weight decay for Muon
-ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
-WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
-WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
-FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
+WEIGHT_DECAY = 0.1      # cautious weight decay for Muon - reduced
+ADAM_BETAS = (0.9, 0.95) # Adam beta1, beta2 - higher momentum
+WARMUP_RATIO = 0.05     # fraction of time budget for LR warmup - added some warmup
+WARMDOWN_RATIO = 0.2    # fraction of time budget for LR warmdown - reduced more
+FINAL_LR_FRAC = 0.1     # final LR as fraction of initial - keep some LR at end
 
 # Model size
-DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+DEPTH = 4               # number of transformer layers (reduced for Tesla T4)
+DEVICE_BATCH_SIZE = 8   # per-device batch size (reduce if OOM) - Tesla T4 needs smaller batches
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -504,7 +569,8 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-model = torch.compile(model, dynamic=False)
+# torch.compile not supported on Python 3.14+
+# model = torch.compile(model, dynamic=False)
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
