@@ -500,9 +500,9 @@ WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
 
 # Optimization
 TOTAL_BATCH_SIZE = 2**16 # ~65K tokens per optimizer step (reduced for Tesla T4)
-EMBEDDING_LR = 1.0      # learning rate for token embeddings (Adam) - increased
-UNEMBEDDING_LR = 0.008  # learning rate for lm_head (Adam) - increased
-MATRIX_LR = 0.08        # learning rate for matrix parameters (Muon) - increased
+EMBEDDING_LR = 1.5      # learning rate for token embeddings (Adam)
+UNEMBEDDING_LR = 0.012  # learning rate for lm_head (Adam)
+MATRIX_LR = 0.12        # learning rate for matrix parameters (Muon)
 SCALAR_LR = 0.5         # learning rate for per-layer scalars (Adam)
 WEIGHT_DECAY = 0.2      # cautious weight decay for Muon
 ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
