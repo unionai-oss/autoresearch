@@ -1,0 +1,84 @@
+warning: `VIRTUAL_ENV=/opt/venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+Using CPython 3.14.3 interpreter at: /opt/venv/bin/python
+Creating virtual environment at: .venv
+Downloading nvidia-cuda-nvrtc-cu12 (84.0MiB)
+Downloading pyarrow (45.4MiB)
+Downloading numpy (15.8MiB)
+Downloading sympy (6.0MiB)
+Downloading networkx (2.0MiB)
+Downloading kiwisolver (1.4MiB)
+Downloading pygments (1.2MiB)
+Downloading nvidia-cufile-cu12 (1.1MiB)
+Downloading tiktoken (1.1MiB)
+Downloading triton (162.6MiB)
+Downloading fonttools (4.7MiB)
+Downloading nvidia-cudnn-cu12 (674.0MiB)
+Downloading nvidia-nvshmem-cu12 (118.9MiB)
+Downloading hf-xet (4.0MiB)
+Downloading pandas (10.4MiB)
+Downloading nvidia-cuda-cupti-cu12 (9.8MiB)
+Downloading nvidia-cublas-cu12 (566.8MiB)
+Downloading nvidia-nccl-cu12 (307.4MiB)
+Downloading nvidia-cusparse-cu12 (274.9MiB)
+Downloading matplotlib (9.4MiB)
+Downloading nvidia-nvjitlink-cu12 (37.4MiB)
+Downloading nvidia-cusparselt-cu12 (273.9MiB)
+Downloading pillow (6.7MiB)
+Downloading nvidia-cusolver-cu12 (255.1MiB)
+Downloading nvidia-cufft-cu12 (184.2MiB)
+Downloading nvidia-curand-cu12 (60.7MiB)
+Downloading rustbpe (1.0MiB)
+Downloading torch (859.1MiB)
+ Downloading rustbpe
+ Downloading nvidia-cufile-cu12
+ Downloading tiktoken
+ Downloading kiwisolver
+ Downloading pygments
+ Downloading hf-xet
+ Downloading fonttools
+ Downloading networkx
+ Downloading pillow
+ Downloading matplotlib
+ Downloading nvidia-cuda-cupti-cu12
+ Downloading numpy
+ Downloading nvidia-nvjitlink-cu12
+ Downloading sympy
+ Downloading nvidia-curand-cu12
+ Downloading nvidia-cuda-nvrtc-cu12
+ Downloading pandas
+ Downloading nvidia-nvshmem-cu12
+ Downloading pyarrow
+ Downloading nvidia-cufft-cu12
+ Downloading triton
+ Downloading nvidia-cusolver-cu12
+ Downloading nvidia-cusparselt-cu12
+ Downloading nvidia-cusparse-cu12
+ Downloading nvidia-nccl-cu12
+ Downloading nvidia-cublas-cu12
+ Downloading nvidia-cudnn-cu12
+ Downloading torch
+Installed 64 packages in 28.66s
+Bytecode compiled 8557 files in 4.63s
+Cache directory: /home/union/.cache/autoresearch
+
+Data: downloading 11 shards (0 already exist)...
+  Downloaded shard_00005.parquet
+  Downloaded shard_00004.parquet
+  Downloaded shard_00002.parquet
+  Downloaded shard_00006.parquet
+  Downloaded shard_00000.parquet
+  Downloaded shard_00007.parquet
+  Downloaded shard_00009.parquet
+  Downloaded shard_00003.parquet
+  Downloaded shard_00008.parquet
+  Downloaded shard_00001.parquet
+  Downloaded shard_06542.parquet
+Data: 11/11 shards ready at /home/union/.cache/autoresearch/data
+
+Tokenizer: training BPE tokenizer...
+Tokenizer: trained in 41.9s, saved to /home/union/.cache/autoresearch/tokenizer/tokenizer.pkl
+Tokenizer: building token_bytes lookup...
+Tokenizer: saved token_bytes to /home/union/.cache/autoresearch/tokenizer/token_bytes.pt
+Tokenizer: sanity check passed (vocab_size=8192)
+
+Done! Ready to train.

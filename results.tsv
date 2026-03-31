@@ -1,0 +1,19 @@
+commit	val_bpb	memory_gb	status	description
+3d673bf	0.006903	4.1	keep	baseline setup for Tesla T4 (depth=4, batch=8)
+82cb7f5	0.000000	0.0	crash	increase depth to 6 (batch size incompatible)
+01a7efa	0.001352	4.1	keep	increased LRs (emb=1.0, unemb=0.008, mat=0.08) - 5x improvement!
+e46f8a1	0.001261	4.1	keep	further increase LRs (emb=1.5, unemb=0.012, mat=0.12)
+4ab4004	0.001265	8.1	discard	batch size 16 - slightly worse, more memory
+9f09cc6	0.001264	4.1	discard	reduce weight decay to 0.1 - no improvement
+321bd72	0.001255	4.1	keep	warmup=0.05, warmdown=0.3 - slight improvement
+f44ce68	0.001305	4.1	discard	LRs too high (emb=2.0, unemb=0.015, mat=0.15) - unstable
+4bcfe6a	0.001461	5.3	discard	increase ASPECT_RATIO to 80 - worse performance
+f44b317	0.001507	4.1	discard	full context (LLLL) - worse than sliding window
+3c440c2	0.001252	4.1	keep	Adam betas (0.9, 0.95) - marginal improvement
+b6344fe	0.001245	4.1	keep	FINAL_LR_FRAC=0.1 - consistent improvement
+d9703ff	0.001271	4.1	discard	SCALAR_LR=0.8 - worse
+fbc37a1	0.001242	4.1	keep	WARMDOWN_RATIO=0.2 - further improvement
+4bb003c	0.001290	4.1	discard	WARMUP_RATIO=0.02 - worse
+00d6796	0.001233	4.1	keep	MATRIX_LR=0.10 - consistent improvements continuing
+57e351d	0.001285	4.1	discard	UNEMBEDDING_LR=0.010 - worse
+5eb5cfa	0.001245	4.1	discard	EMBEDDING_LR=1.4 - slightly worse
