@@ -508,7 +508,7 @@ WEIGHT_DECAY = 0.1      # cautious weight decay for Muon - reduced
 ADAM_BETAS = (0.9, 0.95) # Adam beta1, beta2 - higher momentum
 WARMUP_RATIO = 0.05     # fraction of time budget for LR warmup - added some warmup
 WARMDOWN_RATIO = 0.3    # fraction of time budget for LR warmdown - reduced
-FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
+FINAL_LR_FRAC = 0.1     # final LR as fraction of initial - keep some LR at end
 
 # Model size
 DEPTH = 4               # number of transformer layers (reduced for Tesla T4)
