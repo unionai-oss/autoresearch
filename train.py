@@ -18,9 +18,14 @@ import torch.nn.functional as F
 
 from kernels import get_kernel
 cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+# Check if GPU supports FlashAttention (Ampere or newer, compute capability >= 8.0)
+supports_flash_attn = cap[0] >= 8
+if supports_flash_attn:
+    # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
+    repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+    fa3 = get_kernel(repo).flash_attn_interface
+else:
+    fa3 = None
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -57,6 +62,62 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
+def standard_attention(q, k, v, causal=True, window_size=None):
+    """Standard scaled dot-product attention with optional windowing and causality.
+
+    Args:
+        q: (B, T, n_head, head_dim) query
+        k: (B, T, n_kv_head, head_dim) key
+        v: (B, T, n_kv_head, head_dim) value
+        causal: if True, apply causal mask
+        window_size: tuple (window, 0) for sliding window, or None for full attention
+
+    Returns:
+        out: (B, T, n_head, head_dim) attention output
+    """
+    B, T, n_head, head_dim = q.shape
+    n_kv_head = k.shape[2]
+    kv_repeat = n_head // n_kv_head
+
+    # Repeat k,v for grouped query attention if needed
+    if kv_repeat > 1:
+        k = k.repeat_interleave(kv_repeat, dim=2)
+        v = v.repeat_interleave(kv_repeat, dim=2)
+
+    # Compute attention scores: (B, T, n_head, head_dim) @ (B, head_dim, T, n_head) -> (B, T, T, n_head)
+    scale = head_dim ** -0.5
+    scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, T, n_head, T)
+
+    # Apply windowing if specified
+    if window_size is not None:
+        window = window_size[0]
+        if window > 0 and window < T:
+            mask = torch.ones((T, T), device=q.device, dtype=torch.bool)
+            for i in range(T):
+                start = max(0, i - window)
+                mask[i, :start] = False
+                mask[i, i+1:] = False
+            scores = scores.masked_fill(~mask[None, :, :, None], float('-inf'))
+
+    # Apply causal mask
+    if causal:
+        causal_mask = torch.ones((T, T), device=q.device, dtype=torch.bool).triu(diagonal=1)
+        scores = scores.masked_fill(causal_mask[None, :, :, None], float('-inf'))
+
+    # Softmax and attention
+    attn = torch.softmax(scores, dim=-1)
+    attn = torch.nan_to_num(attn, nan=0.0)  # Handle -inf from masked positions
+
+    # Apply attention to values: (B, T, n_head, T) @ (B, T, n_head, head_dim) -> (B, T, n_head, head_dim)
+    # Need to reshape for matmul: (B, n_head, T, T) @ (B, n_head, T, head_dim)
+    attn_reshaped = attn.transpose(1, 2)  # (B, n_head, T, T)
+    v_reshaped = v.transpose(1, 2)  # (B, n_head, T, head_dim)
+    out = torch.matmul(attn_reshaped, v_reshaped)  # (B, n_head, T, head_dim)
+    out = out.transpose(1, 2)  # (B, T, n_head, head_dim)
+
+    return out
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -89,7 +150,11 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        # Use FlashAttention if available, otherwise use standard attention
+        if supports_flash_attn:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        else:
+            y = standard_attention(q, k, v, causal=True, window_size=window_size)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
