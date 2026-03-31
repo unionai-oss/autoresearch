@@ -63,7 +63,7 @@ def apply_rotary_emb(x, cos, sin):
 
 
 def standard_attention(q, k, v, causal=True, window_size=None):
-    """Standard scaled dot-product attention with optional windowing and causality.
+    """Scaled dot-product attention using PyTorch's built-in, memory-efficient implementation.
 
     Args:
         q: (B, T, n_head, head_dim) query
@@ -89,32 +89,32 @@ def standard_attention(q, k, v, causal=True, window_size=None):
     k = k.transpose(1, 2)  # (B, n_head, T, head_dim)
     v = v.transpose(1, 2)  # (B, n_head, T, head_dim)
 
-    # Compute attention scores: (B, n_head, T, head_dim) @ (B, n_head, head_dim, T) -> (B, n_head, T, T)
-    scale = head_dim ** -0.5
-    scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, n_head, T, T)
+    # Create attention mask if needed
+    attn_mask = None
+    if causal or (window_size is not None and window_size[0] > 0 and window_size[0] < T):
+        # Create a causal mask (upper triangular)
+        if causal:
+            attn_mask = torch.ones((T, T), device=q.device, dtype=torch.bool).triu(diagonal=1)
 
-    # Apply windowing if specified
-    if window_size is not None:
-        window = window_size[0]
-        if window > 0 and window < T:
-            mask = torch.ones((T, T), device=q.device, dtype=torch.bool)
-            for i in range(T):
-                start = max(0, i - window)
-                mask[i, :start] = False
-                mask[i, i+1:] = False
-            scores = scores.masked_fill(~mask[None, None, :, :], float('-inf'))
+        # Apply windowing if specified
+        if window_size is not None:
+            window = window_size[0]
+            if window > 0 and window < T:
+                window_mask = torch.ones((T, T), device=q.device, dtype=torch.bool)
+                for i in range(T):
+                    start = max(0, i - window)
+                    window_mask[i, :start] = True  # Mask out positions outside window
+                    if not causal:
+                        window_mask[i, i+1:] = True
+                if attn_mask is not None:
+                    attn_mask = attn_mask | window_mask
+                else:
+                    attn_mask = window_mask
 
-    # Apply causal mask
-    if causal:
-        causal_mask = torch.ones((T, T), device=q.device, dtype=torch.bool).triu(diagonal=1)
-        scores = scores.masked_fill(causal_mask[None, None, :, :], float('-inf'))
+    # Use PyTorch's scaled_dot_product_attention (memory efficient)
+    out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=causal and attn_mask is None)
 
-    # Softmax and attention
-    attn = torch.softmax(scores, dim=-1)
-    attn = torch.nan_to_num(attn, nan=0.0)  # Handle -inf from masked positions
-
-    # Apply attention to values: (B, n_head, T, T) @ (B, n_head, T, head_dim) -> (B, n_head, T, head_dim)
-    out = torch.matmul(attn, v)  # (B, n_head, T, head_dim)
+    # Transpose back to (B, T, n_head, head_dim)
     out = out.transpose(1, 2)  # (B, T, n_head, head_dim)
 
     return out
