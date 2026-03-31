@@ -81,12 +81,17 @@ def standard_attention(q, k, v, causal=True, window_size=None):
 
     # Repeat k,v for grouped query attention if needed
     if kv_repeat > 1:
-        k = k.repeat_interleave(kv_repeat, dim=2)
-        v = v.repeat_interleave(kv_repeat, dim=2)
+        k = k.repeat_interleave(kv_repeat, dim=2)  # (B, T, n_head, head_dim)
+        v = v.repeat_interleave(kv_repeat, dim=2)  # (B, T, n_head, head_dim)
 
-    # Compute attention scores: (B, T, n_head, head_dim) @ (B, head_dim, T, n_head) -> (B, T, T, n_head)
+    # Transpose to (B, n_head, T, head_dim) for attention computation
+    q = q.transpose(1, 2)  # (B, n_head, T, head_dim)
+    k = k.transpose(1, 2)  # (B, n_head, T, head_dim)
+    v = v.transpose(1, 2)  # (B, n_head, T, head_dim)
+
+    # Compute attention scores: (B, n_head, T, head_dim) @ (B, n_head, head_dim, T) -> (B, n_head, T, T)
     scale = head_dim ** -0.5
-    scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, T, n_head, T)
+    scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, n_head, T, T)
 
     # Apply windowing if specified
     if window_size is not None:
@@ -97,22 +102,19 @@ def standard_attention(q, k, v, causal=True, window_size=None):
                 start = max(0, i - window)
                 mask[i, :start] = False
                 mask[i, i+1:] = False
-            scores = scores.masked_fill(~mask[None, :, :, None], float('-inf'))
+            scores = scores.masked_fill(~mask[None, None, :, :], float('-inf'))
 
     # Apply causal mask
     if causal:
         causal_mask = torch.ones((T, T), device=q.device, dtype=torch.bool).triu(diagonal=1)
-        scores = scores.masked_fill(causal_mask[None, :, :, None], float('-inf'))
+        scores = scores.masked_fill(causal_mask[None, None, :, :], float('-inf'))
 
     # Softmax and attention
     attn = torch.softmax(scores, dim=-1)
     attn = torch.nan_to_num(attn, nan=0.0)  # Handle -inf from masked positions
 
-    # Apply attention to values: (B, T, n_head, T) @ (B, T, n_head, head_dim) -> (B, T, n_head, head_dim)
-    # Need to reshape for matmul: (B, n_head, T, T) @ (B, n_head, T, head_dim)
-    attn_reshaped = attn.transpose(1, 2)  # (B, n_head, T, T)
-    v_reshaped = v.transpose(1, 2)  # (B, n_head, T, head_dim)
-    out = torch.matmul(attn_reshaped, v_reshaped)  # (B, n_head, T, head_dim)
+    # Apply attention to values: (B, n_head, T, T) @ (B, n_head, T, head_dim) -> (B, n_head, T, head_dim)
+    out = torch.matmul(attn, v)  # (B, n_head, T, head_dim)
     out = out.transpose(1, 2)  # (B, T, n_head, head_dim)
 
     return out
