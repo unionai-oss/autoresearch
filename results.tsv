@@ -1,0 +1,18 @@
+commit	val_bpb	memory_gb	status	description
+393fac3	1.558230	5.1	keep	baseline - adapted for T4 GPU with standard attention
+901b890	1.470278	7.0	keep	increase depth from 2 to 3
+0de54ea	1.455281	8.0	keep	increase depth from 3 to 4
+77c7db7	1.452684	8.0	keep	increase MATRIX_LR from 0.04 to 0.06
+ea73256	1.450059	8.0	keep	reduce WARMDOWN_RATIO from 0.5 to 0.3
+fd9bf06	1.445038	8.0	keep	reduce WEIGHT_DECAY from 0.2 to 0.1
+e8985fa	1.418865	8.6	keep	increase HEAD_DIM from 64 to 96
+2e3df14	1.411725	6.6	keep	increase HEAD_DIM from 96 to 128
+891bd20	1.407490	6.9	keep	increase HEAD_DIM from 128 to 160
+c3c9cee	1.397278	7.1	keep	increase HEAD_DIM from 160 to 192
+ea2099c	1.395720	7.1	keep	adjust WARMDOWN_RATIO from 0.3 to 0.35
+19eee92	1.395027	7.1	keep	adjust WARMDOWN_RATIO from 0.35 to 0.4
+3220558	1.394255	7.1	keep	adjust WARMDOWN_RATIO from 0.4 to 0.45
+314ae17	1.394117	7.1	keep	adjust WARMDOWN_RATIO from 0.45 to 0.5
+bbae2ba	1.390777	7.1	keep	increase UNEMBEDDING_LR from 0.004 to 0.006
+6fb3579	1.388873	7.1	keep	set FINAL_LR_FRAC to 0.05 for continued learning at end
+32036d4	1.388534	7.1	keep	increase FINAL_LR_FRAC from 0.05 to 0.1
