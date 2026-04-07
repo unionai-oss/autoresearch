@@ -16,11 +16,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kernels import get_kernel
+# Check GPU capability - FlashAttention 3 requires Ampere (8.0) or newer
 cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+gpu_supports_fa3 = cap[0] >= 8
+fa3 = None
+
+if gpu_supports_fa3:
+    try:
+        from kernels import get_kernel
+        # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
+        repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+        fa3 = get_kernel(repo).flash_attn_interface
+    except (ImportError, RuntimeError):
+        fa3 = None
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -89,7 +97,57 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        if fa3 is not None:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        else:
+            # Fallback to simple scaled dot-product attention
+            scale = self.head_dim ** -0.5
+
+            # Reshape for attention: (B, T, n_head, head_dim) -> (B, n_head, T, head_dim)
+            q_s = q.transpose(1, 2)  # (B, n_head, T, head_dim)
+            k_s = k.transpose(1, 2)  # (B, n_kv_head, T, head_dim)
+            v_s = v.transpose(1, 2)  # (B, n_kv_head, T, head_dim)
+
+            # For GQA: expand k, v to match number of query heads
+            if self.n_kv_head < self.n_head:
+                repeat = self.n_head // self.n_kv_head
+                k_s = k_s.repeat_interleave(repeat, dim=1)
+                v_s = v_s.repeat_interleave(repeat, dim=1)
+
+            # Compute attention in chunks for memory efficiency
+            y_s = torch.zeros(B, self.n_head, T, self.head_dim, dtype=q.dtype, device=q.device)
+
+            for chunk_start in range(0, T, 256):
+                chunk_end = min(chunk_start + 256, T)
+                q_chunk = q_s[:, :, chunk_start:chunk_end, :]  # (B, n_head, chunk, head_dim)
+
+                # Compute scores: (B, n_head, chunk, T)
+                scores = torch.matmul(q_chunk, k_s.transpose(-2, -1)) * scale
+
+                # Apply causal mask
+                pos = torch.arange(T, device=scores.device, dtype=torch.long)
+                causal_mask = pos.unsqueeze(0) <= pos[chunk_start:chunk_end].unsqueeze(1)
+
+                # Apply window mask if using sliding window attention
+                if window_size[0] > 0:
+                    window = window_size[0]
+                    window_mask = pos.unsqueeze(0) >= pos[chunk_start:chunk_end].unsqueeze(1) - (window - 1)
+                    causal_mask = causal_mask & window_mask
+
+                # Mask out future positions
+                scores = scores.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+
+                # Softmax and attend
+                attn = F.softmax(scores, dim=-1)
+                attn = torch.nan_to_num(attn, nan=0.0)  # Handle any NaN from -inf softmax
+
+                # Apply attention to values
+                y_chunk = torch.matmul(attn, v_s)  # (B, n_head, chunk, head_dim)
+                y_s[:, :, chunk_start:chunk_end, :] = y_chunk
+
+            # Reshape back: (B, n_head, T, head_dim) -> (B, T, n_head, head_dim)
+            y = y_s.transpose(1, 2)
+
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
@@ -301,7 +359,6 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
@@ -312,7 +369,6 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
-@torch.compile(dynamic=False, fullgraph=True)
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     # Nesterov momentum
@@ -446,8 +502,8 @@ WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+DEPTH = 4               # number of transformer layers (reduced for older GPUs)
+DEVICE_BATCH_SIZE = 8   # per-device batch size (minimal for Tesla T4 with 14GB VRAM)
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -504,7 +560,7 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-model = torch.compile(model, dynamic=False)
+# model = torch.compile(model, dynamic=False)  # torch.compile not supported on Python 3.14+
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
