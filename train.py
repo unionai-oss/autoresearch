@@ -16,11 +16,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kernels import get_kernel
-cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+try:
+    from kernels import get_kernel
+    cap = torch.cuda.get_device_capability()
+    # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
+    repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+    fa3 = get_kernel(repo).flash_attn_interface
+except (ImportError, RuntimeError):
+    # Fallback if FlashAttention is not available (e.g., on older GPUs)
+    fa3 = None
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -89,7 +93,39 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        if fa3 is not None:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        else:
+            # Fallback to scaled dot-product attention for older GPUs
+            # q, k, v: (B, T, n_head, head_dim)
+            # Compute attention weights: (B, n_head, T, T)
+            scale = self.head_dim ** -0.5
+            scores = torch.einsum("bthd,bshd->bhts", q, k) * scale
+
+            # Apply causal mask
+            if window_size[0] > 0:
+                window = window_size[0]
+                mask = torch.ones((T, T), dtype=torch.bool, device=q.device).tril(diagonal=0)
+                if T > window:
+                    # Apply sliding window mask
+                    diag_mask = torch.ones((T, T), dtype=torch.bool, device=q.device)
+                    for i in range(T):
+                        for j in range(max(0, i - window + 1), i + 1):
+                            if j <= i:
+                                diag_mask[i, j] = True
+                            else:
+                                diag_mask[i, j] = False
+                    mask = diag_mask
+            else:
+                mask = torch.ones((T, T), dtype=torch.bool, device=q.device).tril(diagonal=0)
+
+            scores = scores.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+            attn = F.softmax(scores, dim=-1)
+            attn = torch.nan_to_num(attn)  # Handle -inf from softmax
+
+            # Apply attention to values: (B, n_head, T, head_dim)
+            y = torch.einsum("bhts,bshd->bthd", attn, v)
+
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
