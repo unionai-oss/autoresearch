@@ -100,35 +100,36 @@ class CausalSelfAttention(nn.Module):
         if fa3 is not None:
             y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         else:
-            # Fallback to scaled dot-product attention for older GPUs
+            # Fallback to chunked scaled dot-product attention for memory efficiency
             # q, k, v: (B, T, n_head, head_dim)
-            # Compute attention weights: (B, n_head, T, T)
             scale = self.head_dim ** -0.5
-            scores = torch.einsum("bthd,bshd->bhts", q, k) * scale
+            chunk_size = 256  # Process in chunks to reduce memory
 
-            # Apply causal mask
-            if window_size[0] > 0:
-                window = window_size[0]
-                mask = torch.ones((T, T), dtype=torch.bool, device=q.device).tril(diagonal=0)
-                if T > window:
-                    # Apply sliding window mask
-                    diag_mask = torch.ones((T, T), dtype=torch.bool, device=q.device)
-                    for i in range(T):
-                        for j in range(max(0, i - window + 1), i + 1):
-                            if j <= i:
-                                diag_mask[i, j] = True
-                            else:
-                                diag_mask[i, j] = False
-                    mask = diag_mask
-            else:
-                mask = torch.ones((T, T), dtype=torch.bool, device=q.device).tril(diagonal=0)
+            y = torch.zeros(B, T, self.n_kv_head, self.head_dim, dtype=v.dtype, device=v.device)
 
-            scores = scores.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float('-inf'))
-            attn = F.softmax(scores, dim=-1)
-            attn = torch.nan_to_num(attn)  # Handle -inf from softmax
+            for i in range(0, T, chunk_size):
+                end_i = min(i + chunk_size, T)
+                q_chunk = q[:, i:end_i]  # (B, chunk_size, n_head, head_dim)
 
-            # Apply attention to values: (B, n_head, T, head_dim)
-            y = torch.einsum("bhts,bshd->bthd", attn, v)
+                # Compute attention scores for this chunk: (B, chunk_size, n_head, T)
+                scores = torch.einsum("bchd,bthd->bcnt", q_chunk, k) * scale
+
+                # Apply causal mask - can only attend to positions <= current position
+                causal_mask = torch.arange(T, device=scores.device) <= torch.arange(i, end_i, device=scores.device).unsqueeze(-1)
+
+                # Apply sliding window mask if needed
+                if window_size[0] > 0:
+                    window = window_size[0]
+                    window_mask = torch.arange(T, device=scores.device) >= (torch.arange(i, end_i, device=scores.device).unsqueeze(-1) - window + 1)
+                    causal_mask = causal_mask & window_mask
+
+                scores = scores.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+                attn = F.softmax(scores, dim=-1)
+                attn = torch.nan_to_num(attn)
+
+                # Apply attention: (B, chunk_size, n_head, head_dim)
+                y_chunk = torch.einsum("bcnt,btnd->bcnd", attn, v)
+                y[:, i:end_i] = y_chunk
 
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
@@ -484,8 +485,8 @@ WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+DEPTH = 4               # number of transformer layers (reduced for older GPUs)
+DEVICE_BATCH_SIZE = 32  # per-device batch size (reduced for Tesla T4)
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
