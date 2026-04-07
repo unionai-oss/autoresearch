@@ -1,0 +1,6 @@
+commit	val_bpb	memory_gb	status	description
+b274c31	1.883276	5.0	keep	baseline - reduced model (depth=4, batch=8) for Tesla T4
+64182e8	1.949685	8.7	discard	depth=6 (worse performance)
+2fc3c39	0.000000	0.0	crash	wider model (ASPECT_RATIO=128) hung/timeout
+f110c26	0.000000	0.0	crash	increased learning rates (too slow, timeout)
+1c4bb77	0.000000	0.0	crash	batch size 16 (OOM)
