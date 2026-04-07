@@ -100,36 +100,53 @@ class CausalSelfAttention(nn.Module):
         if fa3 is not None:
             y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         else:
-            # Fallback to chunked scaled dot-product attention for memory efficiency
-            # q, k, v: (B, T, n_head, head_dim)
+            # Fallback to simple scaled dot-product attention
             scale = self.head_dim ** -0.5
-            chunk_size = 256  # Process in chunks to reduce memory
 
-            y = torch.zeros(B, T, self.n_kv_head, self.head_dim, dtype=v.dtype, device=v.device)
+            # Reshape for attention: (B, T, n_head, head_dim) -> (B, n_head, T, head_dim)
+            q_s = q.transpose(1, 2)  # (B, n_head, T, head_dim)
+            k_s = k.transpose(1, 2)  # (B, n_kv_head, T, head_dim)
+            v_s = v.transpose(1, 2)  # (B, n_kv_head, T, head_dim)
 
-            for i in range(0, T, chunk_size):
-                end_i = min(i + chunk_size, T)
-                q_chunk = q[:, i:end_i]  # (B, chunk_size, n_head, head_dim)
+            # For GQA: expand k, v to match number of query heads
+            if self.n_kv_head < self.n_head:
+                repeat = self.n_head // self.n_kv_head
+                k_s = k_s.repeat_interleave(repeat, dim=1)
+                v_s = v_s.repeat_interleave(repeat, dim=1)
 
-                # Compute attention scores for this chunk: (B, chunk_size, n_head, T)
-                scores = torch.einsum("bchd,bthd->bcnt", q_chunk, k) * scale
+            # Compute attention in chunks for memory efficiency
+            y_s = torch.zeros(B, self.n_head, T, self.head_dim, dtype=q.dtype, device=q.device)
 
-                # Apply causal mask - can only attend to positions <= current position
-                causal_mask = torch.arange(T, device=scores.device) <= torch.arange(i, end_i, device=scores.device).unsqueeze(-1)
+            for chunk_start in range(0, T, 256):
+                chunk_end = min(chunk_start + 256, T)
+                q_chunk = q_s[:, :, chunk_start:chunk_end, :]  # (B, n_head, chunk, head_dim)
 
-                # Apply sliding window mask if needed
+                # Compute scores: (B, n_head, chunk, T)
+                scores = torch.matmul(q_chunk, k_s.transpose(-2, -1)) * scale
+
+                # Apply causal mask
+                pos = torch.arange(T, device=scores.device, dtype=torch.long)
+                causal_mask = pos.unsqueeze(0) <= pos[chunk_start:chunk_end].unsqueeze(1)
+
+                # Apply window mask if using sliding window attention
                 if window_size[0] > 0:
                     window = window_size[0]
-                    window_mask = torch.arange(T, device=scores.device) >= (torch.arange(i, end_i, device=scores.device).unsqueeze(-1) - window + 1)
+                    window_mask = pos.unsqueeze(0) >= pos[chunk_start:chunk_end].unsqueeze(1) - (window - 1)
                     causal_mask = causal_mask & window_mask
 
+                # Mask out future positions
                 scores = scores.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
-                attn = F.softmax(scores, dim=-1)
-                attn = torch.nan_to_num(attn)
 
-                # Apply attention: (B, chunk_size, n_head, head_dim)
-                y_chunk = torch.einsum("bcnt,btnd->bcnd", attn, v)
-                y[:, i:end_i] = y_chunk
+                # Softmax and attend
+                attn = F.softmax(scores, dim=-1)
+                attn = torch.nan_to_num(attn, nan=0.0)  # Handle any NaN from -inf softmax
+
+                # Apply attention to values
+                y_chunk = torch.matmul(attn, v_s)  # (B, n_head, chunk, head_dim)
+                y_s[:, :, chunk_start:chunk_end, :] = y_chunk
+
+            # Reshape back: (B, n_head, T, head_dim) -> (B, T, n_head, head_dim)
+            y = y_s.transpose(1, 2)
 
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
