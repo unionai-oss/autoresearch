@@ -503,7 +503,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
 DEPTH = 4               # number of transformer layers (reduced for older GPUs)
-DEVICE_BATCH_SIZE = 32  # per-device batch size (reduced for Tesla T4)
+DEVICE_BATCH_SIZE = 8   # per-device batch size (minimal for Tesla T4 with 14GB VRAM)
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
