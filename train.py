@@ -16,15 +16,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-try:
-    from kernels import get_kernel
-    cap = torch.cuda.get_device_capability()
-    # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-    repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-    fa3 = get_kernel(repo).flash_attn_interface
-except (ImportError, RuntimeError):
-    # Fallback if FlashAttention is not available (e.g., on older GPUs)
-    fa3 = None
+# Check GPU capability - FlashAttention 3 requires Ampere (8.0) or newer
+cap = torch.cuda.get_device_capability()
+gpu_supports_fa3 = cap[0] >= 8
+fa3 = None
+
+if gpu_supports_fa3:
+    try:
+        from kernels import get_kernel
+        # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
+        repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+        fa3 = get_kernel(repo).flash_attn_interface
+    except (ImportError, RuntimeError):
+        fa3 = None
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
