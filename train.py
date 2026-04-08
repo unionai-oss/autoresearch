@@ -19,8 +19,13 @@ import torch.nn.functional as F
 from kernels import get_kernel
 cap = torch.cuda.get_device_capability()
 # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+# FA3 requires Ampere (8,0) or newer; fall back for older GPUs
+use_flash_attn = cap >= (8, 0)
+if use_flash_attn:
+    repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+    fa3 = get_kernel(repo).flash_attn_interface
+else:
+    fa3 = None
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -89,8 +94,24 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        y = y.contiguous().view(B, T, -1)
+        if use_flash_attn:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+            y = y.contiguous().view(B, T, -1)
+        else:
+            # Fallback: use scaled_dot_product_attention for older GPUs
+            # Reshape for multi-head attention: (B, T, n_head, head_dim) -> (B, n_head, T, head_dim)
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            # Handle grouped query attention by expanding k,v if needed
+            if self.n_kv_head < self.n_head:
+                repeat_factor = self.n_head // self.n_kv_head
+                k = k.repeat_interleave(repeat_factor, dim=1)
+                v = v.repeat_interleave(repeat_factor, dim=1)
+            # Apply causal mask
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=1.0/((self.head_dim)**0.5))
+            y = y.transpose(1, 2).contiguous().view(B, T, -1)
+
         y = self.c_proj(y)
         return y
 
