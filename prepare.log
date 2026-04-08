@@ -1,0 +1,21 @@
+warning: `VIRTUAL_ENV=/opt/venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+Bytecode compiled 8557 files in 292ms
+Cache directory: /home/union/.cache/autoresearch
+
+Data: downloading 7 shards (4 already exist)...
+  Downloaded shard_00003.parquet
+  Downloaded shard_00004.parquet
+  Downloaded shard_00006.parquet
+  Downloaded shard_00005.parquet
+  Downloaded shard_00009.parquet
+  Downloaded shard_00007.parquet
+  Downloaded shard_00008.parquet
+Data: 11/11 shards ready at /home/union/.cache/autoresearch/data
+
+Tokenizer: training BPE tokenizer...
+Tokenizer: trained in 42.3s, saved to /home/union/.cache/autoresearch/tokenizer/tokenizer.pkl
+Tokenizer: building token_bytes lookup...
+Tokenizer: saved token_bytes to /home/union/.cache/autoresearch/tokenizer/token_bytes.pt
+Tokenizer: sanity check passed (vocab_size=8192)
+
+Done! Ready to train.
