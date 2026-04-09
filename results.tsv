@@ -1,0 +1,7 @@
+commit	val_bpb	memory_gb	status	description
+869a466	1.506879	6.1	keep	baseline: depth 4, ASPECT_RATIO 32, T4 compatible
+92079bd	1.503515	6.1	keep	reduce warmdown_ratio to 0.2: val_bpb improved from 1.5069 to 1.5035
+c0548d0	1.501241	6.1	keep	FINAL_LR_FRAC=0.1: improves to 1.50124 (from 1.50351)
+a809863	1.472165	3.1	keep	DEVICE_BATCH_SIZE=8: val_bpb improved to 1.47217 (from 1.50124)
+a809863	1.472165	3.1	keep	DEVICE_BATCH_SIZE=8: val_bpb improved to 1.47217 (from 1.50124)
+f013ca4	1.444172	1.6	keep	DEVICE_BATCH_SIZE=4: val_bpb=1.444172 (from 1.472)
